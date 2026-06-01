@@ -44,10 +44,10 @@ function ensure_schema(): void
     );
 
     $db->exec(
-        'CREATE TABLE IF NOT EXISTS jobs (
+        "CREATE TABLE IF NOT EXISTS jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            type TEXT NOT NULL CHECK(type IN ("url", "php")),
+            type TEXT NOT NULL CHECK(type IN ('url', 'php')),
             url TEXT,
             php_file TEXT,
             interval_minutes INTEGER NOT NULL CHECK(interval_minutes >= 1),
@@ -56,8 +56,9 @@ function ensure_schema(): void
             next_run_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
-        )'
+        )"
     );
+    migrate_jobs_table_if_needed($db);
 
     $db->exec(
         'CREATE TABLE IF NOT EXISTS settings (
@@ -84,6 +85,62 @@ function ensure_schema(): void
 
     seed_default_admin($db);
     seed_scheduler_key($db);
+}
+
+function migrate_jobs_table_if_needed(PDO $db): void
+{
+    $db->exec('PRAGMA busy_timeout = 5000');
+
+    $stmt = $db->prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'jobs' LIMIT 1");
+    $stmt->execute();
+    $sql = (string) $stmt->fetchColumn();
+    if ($sql === '') {
+        return;
+    }
+
+    if (strpos($sql, 'CHECK(type IN ("url", "php"))') === false) {
+        return;
+    }
+
+    $db->beginTransaction();
+    try {
+        $db->exec('ALTER TABLE jobs RENAME TO jobs_old');
+        $db->exec(
+            "CREATE TABLE jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL CHECK(type IN ('url', 'php')),
+                url TEXT,
+                php_file TEXT,
+                interval_minutes INTEGER NOT NULL CHECK(interval_minutes >= 1),
+                is_active INTEGER NOT NULL DEFAULT 1,
+                last_run_at TEXT,
+                next_run_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"
+        );
+        $db->exec(
+            "INSERT INTO jobs (id, name, type, url, php_file, interval_minutes, is_active, last_run_at, next_run_at, created_at, updated_at)
+             SELECT id, name, lower(type), url, php_file,
+                    CASE WHEN interval_minutes < 1 THEN 1 ELSE interval_minutes END,
+                    is_active, last_run_at, next_run_at, created_at, updated_at
+             FROM jobs_old
+             WHERE lower(type) IN ('url', 'php')"
+        );
+        $db->commit();
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        throw $e;
+    }
+
+    try {
+        $db->exec('DROP TABLE IF EXISTS jobs_old');
+    } catch (Throwable $e) {
+        // Non-fatal: the migrated schema is already in place.
+    }
 }
 
 function seed_default_admin(PDO $db): void
