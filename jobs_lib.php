@@ -8,6 +8,37 @@ function all_jobs(): array
     return $stmt->fetchAll();
 }
 
+function floor_to_minute_timestamp(int $timestamp): int
+{
+    return (int) (floor($timestamp / 60) * 60);
+}
+
+function minute_datetime_from_timestamp(int $timestamp): string
+{
+    return date('Y-m-d H:i:00', floor_to_minute_timestamp($timestamp));
+}
+
+function immediate_next_run_at(): string
+{
+    return minute_datetime_from_timestamp(time());
+}
+
+function calculate_next_run_at(array $job, int $nowTimestamp): string
+{
+    $intervalSeconds = max(1, (int) $job['interval_minutes']) * 60;
+    $scheduledTs = strtotime((string) ($job['next_run_at'] ?? ''));
+    if ($scheduledTs === false) {
+        $scheduledTs = $nowTimestamp;
+    }
+    $scheduledTs = floor_to_minute_timestamp($scheduledTs);
+
+    do {
+        $scheduledTs += $intervalSeconds;
+    } while ($scheduledTs <= $nowTimestamp);
+
+    return minute_datetime_from_timestamp($scheduledTs);
+}
+
 function find_job(int $jobId): ?array
 {
     $stmt = main_db()->prepare('SELECT * FROM jobs WHERE id = :id LIMIT 1');
@@ -86,7 +117,7 @@ function save_job(array $payload): int
             ':url' => $type === 'url' ? $url : null,
             ':php_file' => null,
             ':interval_minutes' => $interval,
-            ':next_run_at' => $now,
+            ':next_run_at' => immediate_next_run_at(),
             ':created_at' => $now,
             ':updated_at' => $now,
         ]);
@@ -142,7 +173,7 @@ function toggle_job(int $id): void
     $stmt->execute([
         ':is_active' => $active,
         ':updated_at' => app_now(),
-        ':next_run_at' => app_now(),
+        ':next_run_at' => immediate_next_run_at(),
         ':id' => $id,
     ]);
 }
@@ -151,7 +182,7 @@ function queue_now(int $id): void
 {
     $stmt = main_db()->prepare('UPDATE jobs SET next_run_at = :next_run_at, updated_at = :updated_at WHERE id = :id');
     $stmt->execute([
-        ':next_run_at' => app_now(),
+        ':next_run_at' => immediate_next_run_at(),
         ':updated_at' => app_now(),
         ':id' => $id,
     ]);
@@ -252,7 +283,8 @@ function run_single_job(array $job): array
         ':error_message' => $errorMessage,
     ]);
 
-    $nextRunAt = date('Y-m-d H:i:s', time() + (((int) $job['interval_minutes']) * 60));
+    $nowTimestamp = time();
+    $nextRunAt = calculate_next_run_at($job, $nowTimestamp);
     $updateStmt = main_db()->prepare(
         'UPDATE jobs
          SET last_run_at = :last_run_at, next_run_at = :next_run_at, updated_at = :updated_at
