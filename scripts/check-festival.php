@@ -11,7 +11,7 @@ $resturantIDS = [
     'sahebzaman' => '3754y2',
     'khas' => '7j4dln',
     'babataher' => 'pvlr1m',
-    'yas' => 'p6lgnp',
+    //'yas' => 'p6lgnp', 
 ];
 
 $telegramCooldownSeconds = 30 * 60;
