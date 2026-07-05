@@ -1,0 +1,16 @@
+{
+    "simorgh": {
+        "items": {
+            "7760617": {
+                "variation_id": "7760617",
+                "category": "تخفیف روز",
+                "title": "چلو خورشت قورمه سبزی",
+                "price": 230000,
+                "final_price": 207000,
+                "discount_ratio": 90,
+                "stock": "1"
+            }
+        },
+        "last_notify_at": 1783248562
+    }
+}
