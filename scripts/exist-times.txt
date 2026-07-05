@@ -1,2 +1,4 @@
 2026-07-05 14:15:40 - Yaran: discount active (1 item(s))
 2026-07-05 14:19:22 - simorgh: stock changed (چلو خورشت قورمه سبزی: 0→1)
+2026-07-05 14:23:47 - Yaran: discount activated (1 item(s))
+2026-07-05 15:19:29 - simorgh: discount activated (1 item(s))

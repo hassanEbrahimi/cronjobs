@@ -1,5 +1,8 @@
 {
     "simorgh": {
+        "session_date": "2026-07-05",
+        "activation_sent": true,
+        "stock_change_sent": false,
         "items": {
             "7760617": {
                 "variation_id": "7760617",
@@ -10,7 +13,6 @@
                 "discount_ratio": 90,
                 "stock": "1"
             }
-        },
-        "last_notify_at": 1783248562
+        }
     }
 }

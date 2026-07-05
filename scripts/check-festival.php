@@ -15,7 +15,6 @@ $long = 59.57218;
 
 $discountCategoryTitles = ['تخفیف روز', 'فستیوال', 'پارتی'];
 
-$telegramCooldownSeconds = 30 * 60;
 $stockStateFile = __DIR__ . '/discount-stock-state.json';
 
 function loadStockState($file) {
@@ -30,12 +29,12 @@ function saveStockState($file, $state) {
     file_put_contents($file, json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), LOCK_EX);
 }
 
-function canNotifyRestaurant($restaurantState, $cooldownSeconds) {
-    $lastNotifyAt = (int) ($restaurantState['last_notify_at'] ?? 0);
-    if ($lastNotifyAt === 0) {
-        return true;
+function resetRestaurantSessionIfNeeded(&$restaurantState, $today) {
+    if (($restaurantState['session_date'] ?? '') !== $today) {
+        $restaurantState['session_date'] = $today;
+        $restaurantState['activation_sent'] = false;
+        $restaurantState['stock_change_sent'] = false;
     }
-    return (time() - $lastNotifyAt) >= $cooldownSeconds;
 }
 
 function isDiscountCategory($title, $discountCategoryTitles) {
@@ -67,7 +66,7 @@ function normalizeStock($stock) {
     }
     return (string) $stock;
 } 
-
+ 
 function extractDiscountItems($menuCategories, $discountCategoryTitles) {
     $items = [];
 
@@ -151,6 +150,36 @@ function detectStockChanges($currentItems, $previousItems) {
     return $changes;
 }
 
+function buildActivationMessage($name, $items, $restaurantUrl) {
+    $categories = array_values(array_unique(array_column($items, 'category')));
+    $categoryLabel = implode('، ', $categories);
+
+    $lines = [
+        "🎉 تخفیف در *$name* فعال شد!",
+        "📂 $categoryLabel",
+        '',
+    ];
+
+    foreach ($items as $item) {
+        $line = '• ' . $item['title'];
+
+        if ($item['discount_ratio'] !== null && $item['final_price'] < $item['price']) {
+            $line .= "\n  قیمت: " . formatPrice($item['final_price'])
+                . ' (از ' . formatPrice($item['price']) . '، ' . $item['discount_ratio'] . '% تخفیف)';
+        } elseif ($item['final_price'] > 0) {
+            $line .= "\n  قیمت: " . formatPrice($item['final_price']);
+        }
+
+        $line .= "\n  موجودی: " . formatStock($item['stock']);
+        $lines[] = $line;
+    }
+
+    $lines[] = '';
+    $lines[] = $restaurantUrl;
+
+    return implode("\n", $lines);
+}
+
 function buildStockChangeMessage($name, $changes, $restaurantUrl) {
     $lines = [
         "📦 تغییر موجودی در *$name*",
@@ -229,7 +258,7 @@ foreach ($urls as $name => $url) {
 
     $menuCategories = $data['data']['menuCategories'] ?? [];
     $currentItems = extractDiscountItems($menuCategories, $discountCategoryTitles);
-    $previousItems = $stockState[$name]['items'] ?? [];
+    $today = date('Y-m-d');
 
     if (empty($currentItems)) {
         unset($stockState[$name]);
@@ -237,35 +266,56 @@ foreach ($urls as $name => $url) {
         continue;
     }
 
+    if (!isset($stockState[$name])) {
+        $stockState[$name] = [];
+    }
+
+    resetRestaurantSessionIfNeeded($stockState[$name], $today);
+
+    $previousItems = $stockState[$name]['items'] ?? [];
     $itemCount = count($currentItems);
     echo "Discount found in $name ($itemCount item(s)).<br>";
 
+    $shouldActivationNotify = empty($stockState[$name]['activation_sent']);
     $stockChanges = detectStockChanges($currentItems, $previousItems);
+    $shouldStockNotify = empty($stockState[$name]['stock_change_sent']) && !empty($stockChanges);
 
-    if (empty($stockChanges)) {
-        if (empty($previousItems)) {
-            echo "Initial stock saved for $name (no notification on first run).<br>";
+    if (!$shouldActivationNotify && !$shouldStockNotify) {
+        if (!empty($stockChanges)) {
+            echo "Stock changed in $name but already notified for this session.<br>";
         } else {
-            echo "No stock change in $name.<br>";
+            echo "No notification needed for $name.<br>";
         }
-    } elseif (!canNotifyRestaurant($stockState[$name] ?? [], $telegramCooldownSeconds)) {
-        $lastNotifyAt = (int) ($stockState[$name]['last_notify_at'] ?? 0);
-        $remainingMinutes = (int) ceil(($telegramCooldownSeconds - (time() - $lastNotifyAt)) / 60);
-        echo "Stock changed in $name but cooldown active (~{$remainingMinutes} min left).<br>";
     } else {
-        $telegramMessage = buildStockChangeMessage($name, $stockChanges, $resturant_urls[$name]);
-        $result = sendTelegramMessage($telegramApiUrl, $telegramChatId, $telegramMessage);
+        if ($shouldActivationNotify) {
+            $telegramMessage = buildActivationMessage($name, array_values($currentItems), $resturant_urls[$name]);
+            $result = sendTelegramMessage($telegramApiUrl, $telegramChatId, $telegramMessage);
 
-        if ($result === false) {
-            echo "Failed to send Telegram message for $name.<br>";
-        } else {
-            $stockState[$name]['last_notify_at'] = time();
-            $changeSummary = implode(', ', array_map(function ($change) {
-                return $change['item']['title'] . ': ' . formatStock($change['old_stock']) . '→' . formatStock($change['new_stock']);
-            }, $stockChanges));
-            $logEntry = date("Y-m-d H:i:s") . " - $name: stock changed ($changeSummary)" . PHP_EOL;
-            file_put_contents($logFile, $logEntry, FILE_APPEND | LOCK_EX);
-            echo "Telegram sent for $name stock change.<br>";
+            if ($result === false) {
+                echo "Failed to send activation Telegram for $name.<br>";
+            } else {
+                $stockState[$name]['activation_sent'] = true;
+                $logEntry = date("Y-m-d H:i:s") . " - $name: discount activated ($itemCount item(s))" . PHP_EOL;
+                file_put_contents($logFile, $logEntry, FILE_APPEND | LOCK_EX);
+                echo "Telegram sent for $name activation.<br>";
+            }
+        }
+
+        if ($shouldStockNotify) {
+            $telegramMessage = buildStockChangeMessage($name, $stockChanges, $resturant_urls[$name]);
+            $result = sendTelegramMessage($telegramApiUrl, $telegramChatId, $telegramMessage);
+
+            if ($result === false) {
+                echo "Failed to send stock change Telegram for $name.<br>";
+            } else {
+                $stockState[$name]['stock_change_sent'] = true;
+                $changeSummary = implode(', ', array_map(function ($change) {
+                    return $change['item']['title'] . ': ' . formatStock($change['old_stock']) . '→' . formatStock($change['new_stock']);
+                }, $stockChanges));
+                $logEntry = date("Y-m-d H:i:s") . " - $name: stock changed ($changeSummary)" . PHP_EOL;
+                file_put_contents($logFile, $logEntry, FILE_APPEND | LOCK_EX);
+                echo "Telegram sent for $name stock change.<br>";
+            }
         }
     }
 
