@@ -22,11 +22,13 @@ if ($providedKey === '' || !hash_equals($schedulerKey, $providedKey)) {
 
 try {
     $results = run_due_jobs();
+    $purge = purge_old_logs();
     echo json_encode([
         'ok' => true,
         'timezone' => APP_TIMEZONE,
         'time' => app_now(),
         'ran_jobs' => count($results),
+        'purged_logs' => $purge['deleted'],
         'results' => $results,
     ], JSON_PRETTY_PRINT);
 } catch (Throwable $e) {

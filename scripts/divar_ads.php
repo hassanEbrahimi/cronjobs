@@ -1,13 +1,13 @@
 <?php
 date_default_timezone_set('Asia/Tehran');
 
-const DIVAR_SEARCH_URL = 'https://divar.ir/s/mashhad/rent-office?bbox=59.2747803,36.1845741,60.1158295,36.9758339&credit=5-50000000&map_bbox=59.2747802734375,36.184574127197266,60.11582946777344,36.975833892822266&map_place_hash=3%7C%7Creal-estate&rent=3000000-8000000';
+const DIVAR_SEARCH_URL = 'https://divar.ir/s/mashhad/rent-office?credit=5-50000000&rent=3000000-8000000';
 const TOP_ADS_COUNT = 5;
 
 $telegramBotToken = '8399338777:AAHOzILkxgXbBA9Yz1aX-CSEGc-2cn_J0Po';
 $telegramApiUrl   = 'https://api.telegram.org/bot' . $telegramBotToken . '/sendMessage';
 $telegramChatId   = '95963053';
-
+ 
 $stateFile = __DIR__ . '/divar-last-tokens.json';
 
 function fetchDivarPage(string $url): string

@@ -82,6 +82,7 @@ function ensure_schema(): void
             error_message TEXT
         )'
     );
+    $logs->exec('CREATE INDEX IF NOT EXISTS idx_cron_logs_started_at ON cron_logs(started_at)');
 
     seed_default_admin($db);
     seed_scheduler_key($db);

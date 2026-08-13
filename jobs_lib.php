@@ -196,6 +196,40 @@ function recent_logs(int $limit = 50): array
     return $stmt->fetchAll();
 }
 
+function purge_old_logs(bool $vacuum = true): array
+{
+    $days = max(1, (int) LOG_RETENTION_DAYS);
+    $cutoff = date('Y-m-d H:i:s', strtotime('-' . $days . ' days'));
+    $logs = logs_db();
+
+    $stmt = $logs->prepare('DELETE FROM cron_logs WHERE datetime(started_at) < datetime(:cutoff)');
+    $stmt->execute([':cutoff' => $cutoff]);
+    $deleted = $stmt->rowCount();
+
+    $vacuumed = false;
+    if ($vacuum && $deleted > 0) {
+        $lastVacuumKey = 'logs_last_vacuum_date';
+        $today = date('Y-m-d');
+        $lastVacuum = get_setting($lastVacuumKey);
+        if ($lastVacuum !== $today) {
+            // Reclaim disk space after deletions (at most once per day).
+            $logs->exec('VACUUM');
+            $vacuumed = true;
+            $save = main_db()->prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (:key, :value)');
+            $save->execute([
+                ':key' => $lastVacuumKey,
+                ':value' => $today,
+            ]);
+        }
+    }
+
+    return [
+        'cutoff' => $cutoff,
+        'deleted' => $deleted,
+        'vacuumed' => $vacuumed,
+    ];
+}
+
 function write_php_job_file(int $jobId, string $code): string
 {
     $trimmed = trim($code);
