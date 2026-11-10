@@ -1,8 +1,34 @@
 <?php
 date_default_timezone_set('Asia/Tehran');
 
-const DIVAR_SEARCH_URL = 'https://divar.ir/s/mashhad/rent-office?credit=5-50000000&rent=3000000-8000000';
 const TOP_ADS_COUNT = 5;
+
+$searches = [
+    [
+        'id'             => 'office',
+        'label'          => 'اجاره دفترکار مشهد',
+        'heading'        => '🏢 *آگهی جدید دفترکار مشهد*',
+        'url'                  => 'https://divar.ir/s/mashhad/rent-office?credit=5-50000000&rent=3000000-8000000',
+        'applyIgnore'          => true,
+        'dedupePermanentByUrl' => true,
+    ],
+    [
+        'id'                  => 'windows_tablet',
+        'label'               => 'تبلت ویندوزی مشهد',
+        'heading'             => '📱 *آگهی جدید تبلت ویندوزی مشهد*',
+        'url'                 => 'https://divar.ir/s/mashhad/tablet?os=Windows%2C',
+        'applyIgnore'         => false,
+        'dedupePermanentByUrl' => true,
+    ],
+    [
+        'id'                   => 'tablet_computers',
+        'label'                => 'تبلت کامپیوتر ۵–۲۲ میلیون مشهد',
+        'heading'              => '📱 *آگهی جدید تبلت مشهد (کامپیوتر)*',
+        'url'                  => 'https://divar.ir/s/mashhad/computers?price=5000000-22000000&q=' . rawurlencode('تبلت'),
+        'applyIgnore'          => false,
+        'dedupePermanentByUrl' => true,
+    ],
+];
 
 $telegramBotToken = '8399338777:AAHOzILkxgXbBA9Yz1aX-CSEGc-2cn_J0Po';
 $telegramApiUrl   = 'https://api.telegram.org/bot' . $telegramBotToken . '/sendMessage';
@@ -118,25 +144,84 @@ function getTopAds(string $html, int $limit): array
     $rows = [];
     findPostRows($state, $rows);
 
-    if (empty($rows)) {
-        throw new RuntimeException('No ads found on page');
-    }
-
     return array_slice($rows, 0, $limit);
 }
 
-function loadLastTokens(string $file): array
+function loadState(string $file): array
 {
     if (!file_exists($file)) {
         return [];
     }
     $data = json_decode(file_get_contents($file), true);
-    return is_array($data) ? $data : [];
+    if (!is_array($data)) {
+        return [];
+    }
+    if (isset($data[0]) && is_string($data[0])) {
+        return ['office' => $data];
+    }
+    return $data;
 }
 
-function saveLastTokens(string $file, array $tokens): void
+function saveState(string $file, array $state): void
 {
-    file_put_contents($file, json_encode(array_values($tokens), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), LOCK_EX);
+    file_put_contents($file, json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+function adUrl(array $ad): string
+{
+    $token = $ad['token'] ?? '';
+    return $token === '' ? '' : 'https://divar.ir/v/' . $token;
+}
+
+function getSearchLastTokens($searchState): array
+{
+    if (!is_array($searchState)) {
+        return [];
+    }
+    if (isset($searchState['lastTokens'])) {
+        return $searchState['lastTokens'];
+    }
+    if (isset($searchState['notifiedUrls'])) {
+        return [];
+    }
+    return array_values(array_filter($searchState, 'is_string'));
+}
+
+function getNotifiedUrls($searchState): array
+{
+    if (!is_array($searchState)) {
+        return [];
+    }
+    if (isset($searchState['notifiedUrls'])) {
+        return $searchState['notifiedUrls'];
+    }
+    $urls = [];
+    foreach (array_values(array_filter($searchState, 'is_string')) as $token) {
+        $urls[] = 'https://divar.ir/v/' . $token;
+    }
+    return $urls;
+}
+
+function acquireStateLock(string $stateFile)
+{
+    $handle = fopen($stateFile . '.lock', 'c+');
+    if ($handle === false) {
+        return false;
+    }
+    if (!flock($handle, LOCK_EX | LOCK_NB)) {
+        fclose($handle);
+        return false;
+    }
+    return $handle;
+}
+
+function releaseStateLock($handle): void
+{
+    if ($handle === false) {
+        return;
+    }
+    flock($handle, LOCK_UN);
+    fclose($handle);
 }
 
 function sendTelegram(string $message, string $apiUrl, string $chatId): bool
@@ -213,7 +298,7 @@ function isIgnoredAd(array $ad): bool
     return false;
 }
 
-function formatAdMessage(array $ad): string
+function formatAdMessage(array $ad, string $heading): string
 {
     $token = $ad['token'] ?? '';
     $title = $ad['title'] ?? 'بدون عنوان';
@@ -222,7 +307,7 @@ function formatAdMessage(array $ad): string
     $link  = 'https://divar.ir/v/' . $token;
 
     $lines = [
-        '🏢 *آگهی جدید دفترکار مشهد*',
+        $heading,
         '',
         '*' . $title . '*',
     ];
@@ -240,42 +325,91 @@ function formatAdMessage(array $ad): string
 }
 
 $errors = [];
-$ads = [];
-$newAds = [];
+$results = [];
 $sentCount = 0;
+$skippedConcurrent = false;
+$stateLock = acquireStateLock($stateFile);
+if ($stateLock === false) {
+    $skippedConcurrent = true;
+} else {
+    $state = loadState($stateFile);
+}
 
-try {
-    $html = fetchDivarPage(DIVAR_SEARCH_URL);
-    $ads = getTopAds($html, TOP_ADS_COUNT);
-    $lastTokens = loadLastTokens($stateFile);
-    $currentTokens = array_column($ads, 'token');
+if (!$skippedConcurrent) {
+foreach ($searches as $search) {
+    $searchId = $search['id'];
+    $ads = [];
+    $newAds = [];
 
-    foreach ($ads as $ad) {
-        if (in_array($ad['token'], $lastTokens, true)) {
-            continue;
+    try {
+        $html = fetchDivarPage($search['url']);
+        $ads = getTopAds($html, TOP_ADS_COUNT);
+        $searchState = $state[$searchId] ?? [];
+        $currentTokens = array_column($ads, 'token');
+        $permanentByUrl = !empty($search['dedupePermanentByUrl']);
+        $notifiedUrls = $permanentByUrl ? getNotifiedUrls($searchState) : [];
+        $lastTokens = getSearchLastTokens($searchState);
+
+        foreach ($ads as $ad) {
+            if ($permanentByUrl) {
+                $url = adUrl($ad);
+                if ($url === '' || in_array($url, $notifiedUrls, true)) {
+                    continue;
+                }
+            } elseif (in_array($ad['token'], $lastTokens, true)) {
+                continue;
+            }
+            if (!empty($search['applyIgnore']) && isIgnoredAd($ad)) {
+                continue;
+            }
+            $newAds[] = $ad;
         }
-        if (isIgnoredAd($ad)) {
-            continue;
+
+        foreach ($newAds as $ad) {
+            $url = adUrl($ad);
+            if ($permanentByUrl && $url !== '') {
+                $notifiedUrls[] = $url;
+                $state[$searchId] = [
+                    'lastTokens'   => array_values($currentTokens),
+                    'notifiedUrls' => array_values(array_unique($notifiedUrls)),
+                ];
+                saveState($stateFile, $state);
+            }
+
+            if (sendTelegram(formatAdMessage($ad, $search['heading']), $telegramApiUrl, $telegramChatId)) {
+                $sentCount++;
+            }
         }
-        $newAds[] = $ad;
+
+        if ($permanentByUrl) {
+            $state[$searchId] = [
+                'lastTokens'   => array_values($currentTokens),
+                'notifiedUrls' => array_values(array_unique($notifiedUrls)),
+            ];
+        } else {
+            $state[$searchId] = array_values($currentTokens);
+        }
+    } catch (Throwable $e) {
+        $errors[] = $search['label'] . ': ' . $e->getMessage();
     }
 
-    foreach ($newAds as $ad) {
-        if (sendTelegram(formatAdMessage($ad), $telegramApiUrl, $telegramChatId)) {
-            $sentCount++;
-        }
-    }
+    $results[] = [
+        'search'       => $search,
+        'ads'          => $ads,
+        'newAds'       => $newAds,
+        'notifiedUrls' => $permanentByUrl ? ($state[$searchId]['notifiedUrls'] ?? []) : [],
+    ];
+}
 
-    saveLastTokens($stateFile, $currentTokens);
-} catch (Throwable $e) {
-    $errors[] = $e->getMessage();
+saveState($stateFile, $state);
+releaseStateLock($stateLock);
 }
 ?>
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <title>آگهی‌های دفترکار مشهد - دیوار</title>
+    <title>آگهی‌های دیوار مشهد</title>
     <style>
         body { font-family: Tahoma, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
         h2 { text-align: center; }
@@ -290,57 +424,88 @@ try {
     </style>
 </head>
 <body>
-<h2>۵ آگهی اول — اجاره دفترکار مشهد</h2>
+<h2>آگهی‌های دیوار مشهد</h2>
 
 <?php if (!empty($errors)): ?>
     <div class="error"><?php echo htmlspecialchars(implode(' | ', $errors)); ?></div>
 <?php endif; ?>
 
 <div class="info">
+    <?php if ($skippedConcurrent): ?>
+        اجرای دیگری در حال پردازش است؛ برای جلوگیری از پیام تکراری این دور رد شد.
+    <?php else: ?>
+    <?php
+    $hasNew = false;
+    foreach ($results as $result) {
+        if (!empty($result['newAds'])) {
+            $hasNew = true;
+            break;
+        }
+    }
+    ?>
     <?php if ($sentCount > 0): ?>
         <?php echo $sentCount; ?> پیام جدید به تلگرام ارسال شد.
-    <?php elseif (empty($errors) && empty($newAds)): ?>
-        آگهی جدیدی در ۵ تای اول نیست.
-    <?php elseif (!empty($newAds) && $sentCount === 0): ?>
+    <?php elseif (empty($errors) && !$hasNew): ?>
+        آگهی جدیدی در ۵ تای اول هیچ‌کدام از جستجوها نیست.
+    <?php elseif ($hasNew && $sentCount === 0): ?>
         آگهی جدید یافت شد ولی ارسال تلگرام ناموفق بود.
+    <?php endif; ?>
     <?php endif; ?>
 </div>
 
-<table>
-    <tr>
-        <th>#</th>
-        <th>عنوان</th>
-        <th>اجاره / رهن</th>
-        <th>محله</th>
-        <th>لینک</th>
-        <th>وضعیت</th>
-    </tr>
-    <?php if (!empty($ads)): ?>
-        <?php foreach ($ads as $i => $ad):
-            $ignored = isIgnoredAd($ad);
-            $isNew = in_array($ad, $newAds, true);
-            $link = 'https://divar.ir/v/' . ($ad['token'] ?? '');
-            $rowClass = $ignored ? 'ignored' : ($isNew ? 'new' : '');
-            if ($ignored) {
-                $status = 'فیلتر شده';
-            } elseif ($isNew) {
-                $status = 'جدید';
-            } else {
-                $status = 'قبلی';
-            }
-            ?>
-            <tr class="<?php echo $rowClass; ?>">
-                <td><?php echo $i + 1; ?></td>
-                <td><?php echo htmlspecialchars($ad['title'] ?? ''); ?></td>
-                <td><?php echo htmlspecialchars($ad['middle_description_text'] ?? '-'); ?></td>
-                <td><?php echo htmlspecialchars($ad['bottom_description_text'] ?? '-'); ?></td>
-                <td><a href="<?php echo htmlspecialchars($link); ?>" target="_blank">مشاهده</a></td>
-                <td><?php echo $status; ?></td>
-            </tr>
-        <?php endforeach; ?>
-    <?php else: ?>
-        <tr><td colspan="6">آگهی‌ای یافت نشد.</td></tr>
-    <?php endif; ?>
-</table>
+<?php foreach ($results as $result):
+    $search = $result['search'];
+    $ads = $result['ads'];
+    $newAds = $result['newAds'];
+    $notifiedUrls = $result['notifiedUrls'] ?? [];
+    $permanentByUrl = !empty($search['dedupePermanentByUrl']);
+    ?>
+    <h2>۵ آگهی اول — <?php echo htmlspecialchars($search['label']); ?></h2>
+    <table>
+        <tr>
+            <th>#</th>
+            <th>عنوان</th>
+            <th>اجاره / رهن</th>
+            <th>محله</th>
+            <th>لینک</th>
+            <th>وضعیت</th>
+        </tr>
+        <?php if (!empty($ads)): ?>
+            <?php foreach ($ads as $i => $ad):
+                $ignored = !empty($search['applyIgnore']) && isIgnoredAd($ad);
+                $link = adUrl($ad);
+                $isNew = false;
+                foreach ($newAds as $newAd) {
+                    if (($newAd['token'] ?? '') === ($ad['token'] ?? '')) {
+                        $isNew = true;
+                        break;
+                    }
+                }
+                $alreadyNotified = $permanentByUrl && $link !== '' && in_array($link, $notifiedUrls, true);
+                $rowClass = $ignored ? 'ignored' : ($isNew ? 'new' : '');
+                if ($ignored) {
+                    $status = 'فیلتر شده';
+                } elseif ($isNew) {
+                    $status = 'جدید';
+                } elseif ($alreadyNotified) {
+                    $status = 'اطلاع‌رسانی شده';
+                } else {
+                    $status = 'قبلی';
+                }
+                ?>
+                <tr class="<?php echo $rowClass; ?>">
+                    <td><?php echo $i + 1; ?></td>
+                    <td><?php echo htmlspecialchars($ad['title'] ?? ''); ?></td>
+                    <td><?php echo htmlspecialchars($ad['middle_description_text'] ?? '-'); ?></td>
+                    <td><?php echo htmlspecialchars($ad['bottom_description_text'] ?? '-'); ?></td>
+                    <td><a href="<?php echo htmlspecialchars($link); ?>" target="_blank">مشاهده</a></td>
+                    <td><?php echo $status; ?></td>
+                </tr>
+            <?php endforeach; ?>
+        <?php else: ?>
+            <tr><td colspan="6">آگهی‌ای یافت نشد.</td></tr>
+        <?php endif; ?>
+    </table>
+<?php endforeach; ?>
 </body>
 </html>
